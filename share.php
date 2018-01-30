@@ -69,6 +69,14 @@ $store_file_name = $CONFIG_STORE_DIR . '/store-' . hash('sha256', $upload_file_n
 
 $request_method = $_SERVER['REQUEST_METHOD'];
 
+//cors support for all supported methods
+if(in_array($request_method, array('OPTIONS', 'HEAD', 'GET', 'PUT')))
+{
+	header("Access-Control-Allow-Origin: *");
+	header("Access-Control-Allow-Headers: Content-Type");
+	header("Access-Control-Allow-Methods: OPTIONS, HEAD, GET, PUT");
+}
+
 if(array_key_exists('v', $_GET) === TRUE && $request_method === 'PUT') {
 	$headers = getallheaders();
 
@@ -77,43 +85,68 @@ if(array_key_exists('v', $_GET) === TRUE && $request_method === 'PUT') {
 
 	$calculated_token = hash_hmac('sha256', "$upload_file_name $upload_file_size", $CONFIG_SECRET);
 	if($upload_token !== $calculated_token) {
-		header('HTTP/1.0 403 Forbidden');
+		http_response_code(403);		//Forbidden
 		exit;
 	}
 
-	/* Open a file for writing */
-	$store_file = fopen($store_file_name, 'x');
-
-	if($store_file === FALSE) {
-		header('HTTP/1.0 409 Conflict');
+	/* Check if file already exists */
+	if(file_exists($store_file_name)) {
+		http_response_code(409);		//Conflict
 		exit;
 	}
 
-	/* PUT data comes in on the stdin stream */
-	$incoming_data = fopen('php://input', 'r');
-
-	/* Read the data a chunk at a time and write to the file */
-	while ($data = fread($incoming_data, $CONFIG_CHUNK_SIZE)) {
-  		fwrite($store_file, $data);
+	/* Write file and check if everything could be saved */
+	$written=@file_put_contents($store_file_name, fopen('php://input', 'r'));
+	if($written!=$_SERVER['CONTENT_LENGTH']) {
+		http_response_code(507);		//Insufficient Storage
+		exit;
 	}
 
-	/* Close the streams */
-	fclose($incoming_data);
-	fclose($store_file);
 } else if($request_method === 'GET' || $request_method === 'HEAD') {
 	// Send file (using X-Sendfile would be nice here...)
+
 	if(file_exists($store_file_name)) {
+		$finfo=finfo_open(FILEINFO_MIME_TYPE);
+		$mime_type=finfo_file($finfo, $store_file_name);
+		finfo_close($finfo);
+		header('X-Content-Type-Options: nosniff');		//gives better security in browsers
+		header("Content-Type: $mime_type");
 		header('Content-Disposition: attachment');
-		header('Content-Type: application/octet-stream');
 		header('Content-Length: '.filesize($store_file_name));
 		if($request_method !== 'HEAD') {
-			readfile($store_file_name);
+			set_time_limit(0);
+			$file = @fopen($store_file_name,"rb");
+			while(!feof($file))	{
+				print(@fread($file, 1024*8));
+				ob_flush();
+				flush();
+			}
 		}
 	} else {
-		header('HTTP/1.0 404 Not Found');
+		http_response_code(404);		//Not Found
 	}
+} else if($request_method === 'OPTIONS') {
+	;		//do nothing special here
 } else {
-	header('HTTP/1.0 400 Bad Request');
+
+	http_response_code(400);		//Bad Request
 }
 
 exit;
+
+// For 4.3.0 <= PHP <= 5.4.0
+// See https://stackoverflow.com/a/12018482/3528174
+if (!function_exists('http_response_code'))
+{
+	function http_response_code($newcode = NULL)
+	{
+		static $code = 200;
+		if($newcode !== NULL)
+		{
+			header('X-PHP-Response-Code: '.$newcode, true, $newcode);
+			if(!headers_sent())
+			$code = $newcode;
+		}
+		return $code;
+	}
+}

@@ -1,6 +1,7 @@
 -- mod_http_upload_external
 --
 -- Copyright (C) 2015-2016 Kim Alvefur
+-- Copyright (C) 2018 Christian Schneppe (added urn:xmpp:http:upload:0)
 --
 -- This file is MIT/X11 licensed.
 --
@@ -21,14 +22,21 @@ local secret = assert(module:get_option_string(module.name .. "_secret"), module
 module:depends("disco");
 
 -- namespace
-local xmlns_http_upload = "urn:xmpp:http:upload";
+local namespace = "urn:xmpp:http:upload:0";
+local legacy_namespace = "urn:xmpp:http:upload";
 
 -- identity and feature advertising
 module:add_identity("store", "file", module:get_option_string("name", "HTTP File Upload"))
-module:add_feature(xmlns_http_upload);
+module:add_feature(namespace);
+module:add_feature(legacy_namespace);
 
 module:add_extension(dataform {
-	{ name = "FORM_TYPE", type = "hidden", value = xmlns_http_upload },
+	{ name = "FORM_TYPE", type = "hidden", value = namespace },
+	{ name = "max-file-size", type = "text-single" },
+}:form({ ["max-file-size"] = tostring(file_size_limit) }, "result"));
+
+module:add_extension(dataform {
+	{ name = "FORM_TYPE", type = "hidden", value = legacy_namespace },
 	{ name = "max-file-size", type = "text-single" },
 }:form({ ["max-file-size"] = tostring(file_size_limit) }, "result"));
 
@@ -40,7 +48,42 @@ local function magic_crypto_dust(random, filename, filesize)
 end
 
 -- hooks
-module:hook("iq/host/"..xmlns_http_upload..":request", function (event)
+module:hook("iq/host/"..namespace..":request", function (event)
+  local stanza, origin = event.stanza, event.origin;
+  local request = stanza.tags[1];
+  -- local clients only
+	if origin.type ~= "c2s" then
+		module:log("debug", "Request for upload slot from a %s", origin.type);
+		return nil, st.error_reply(stanza, "cancel", "not-authorized");
+	end
+	-- validate
+	local filename = request.attr.filename;
+	if not filename or filename:find("/") then
+		module:log("debug", "Filename %q not allowed", filename or "");
+		return nil, st.error_reply(stanza, "modify", "bad-request", "Invalid filename");
+	end
+	local filesize = tonumber(request.attr.size);
+	if not filesize then
+		module:log("debug", "Missing file size");
+		return nil, st.error_reply(stanza, "modify", "bad-request", "Missing or invalid file size");
+	elseif filesize > file_size_limit then
+		module:log("debug", "File too large (%d > %d)", filesize, file_size_limit);
+		return nil, st.error_reply(stanza, "modify", "not-acceptable", "File too large")
+		  :tag("file-too-large", {xmlns=namespace})
+			:tag("max-file-size"):text(tostring(file_size_limit));
+	end
+	local reply = st.reply(stanza);
+	reply:tag("slot", { xmlns = namespace });
+	local random = uuid();
+	local get_url, verify = magic_crypto_dust(random, filename, filesize);
+	reply:tag("get"):text(get_url):up();
+	reply:tag("put"):text(get_url .. verify):up();
+	module:log("info", "Handed out upload slot %s to %s@%s", get_url, origin.username, origin.host);
+	origin.send(reply);
+	return true;
+end);
+
+module:hook("iq/host/"..legacy_namespace..":request", function (event)
 	local stanza, origin = event.stanza, event.origin;
 	local request = stanza.tags[1];
 	-- local clients only
@@ -69,7 +112,7 @@ module:hook("iq/host/"..xmlns_http_upload..":request", function (event)
 		return true;
 	end
 	local reply = st.reply(stanza);
-	reply:tag("slot", { xmlns = xmlns_http_upload });
+	reply:tag("slot", { xmlns = legacy_namespace });
 	local random = uuid();
 	local get_url, verify = magic_crypto_dust(random, filename, filesize);
 	reply:tag("get"):text(get_url):up();

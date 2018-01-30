@@ -9,6 +9,8 @@ Introduction
 This module implements [XEP-0363], which lets clients upload files
 over HTTP to an external web server.
 
+This module is ready for the new namespace urn:xmpp:http:upload:0
+
 This module generates URLs that are signed using a HMAC. Any web service that can authenticate
 these URLs can be used. 
 
